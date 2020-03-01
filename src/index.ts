@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer } from 'electron';
+import { app, BrowserWindow, desktopCapturer, shell } from 'electron';
 declare const MAIN_WINDOW_WEBPACK_ENTRY: any;
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -13,9 +13,51 @@ const createWindow = () => {
     height: 600,
     width: 800,
     webPreferences: {
-      nodeIntegration: true
+      nodeIntegration: true,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
+      enableRemoteModule: false
     }
   });
+
+  process.env['ELECTRON_ENABLE_SECURITY_WARNINGS'] = 'true';
+
+  /*const { session } = require('electron')
+
+  session.defaultSession.webRequest.onHeadersReceived((details: any, callback: Function) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': ['default-src \'none\'']
+      }
+    })
+  })*/
+
+  app.on('web-contents-created', (event, contents) => {
+    contents.on('will-attach-webview', (event, webPreferences, params) => {
+      // Strip away preload scripts if unused or verify their location is legitimate
+      delete webPreferences.preload
+  
+      // Disable Node.js integration
+      webPreferences.nodeIntegration = false
+      webPreferences.nodeIntegrationInSubFrames = false;
+      webPreferences.nodeIntegrationInWorker = false;
+      webPreferences.contextIsolation = true;
+  
+      // Verify URL being loaded
+      if (!params.src.startsWith('https://')) {
+        event.preventDefault()
+      }
+    })
+
+    contents.on('new-window', async (event, navigationUrl) => {
+      // In this example, we'll ask the operating system
+      // to open this event's url in the default browser.
+      event.preventDefault()
+  
+      await shell.openExternal(navigationUrl)
+    })
+  })
 
   // and load the index.html of the app.
   mainWindow.loadURL(MAIN_WINDOW_WEBPACK_ENTRY);
