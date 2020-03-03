@@ -1,11 +1,21 @@
 <!DOCTYPE html>
 <html>
-  <head>
-    <meta charset="UTF-8">
-    <title>couchstream</title>
-  </head>
-  <div id="message"></div>
-  <input type="file" accept="video/*">
-  <br>
-  <video controls autoplay></video>
+    <head>
+        <meta charset="UTF-8">
+        <title>couchstream</title>
+    </head>
+    <body>
+        <div id="room">
+            <h3>Join</h3>
+            <input type="text" id="roomId">
+            <button id="joinBtn">Join</button>
+            <hr>
+            <h3>Host</h3>
+            <div id="message"></div>
+            <input type="file" accept="video/*" id="fileSelector">
+        </div>
+        <button id="hangupBtn" hidden>Hang Up</button>
+        <hr>
+        <video controls autoplay hidden></video>
+    </body>
 </html>
