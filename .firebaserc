@@ -1,5 +1,6 @@
 {
   "projects": {
-    "default": "couchstream-44159"
+    "default": "couchstream-44159",
+    "prod": "couchstream-44159"
   }
 }

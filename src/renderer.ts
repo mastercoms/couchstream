@@ -2,7 +2,7 @@ import './index.css';
 import { DesktopCapturerSource } from 'electron';
 import * as firebase from 'firebase/app';
 import 'firebase/firestore';
-import { constants } from 'fs';
+import 'firebase/functions';
 
 console.log('👋 This message is being logged by "renderer.js", included via webpack');
 
@@ -50,38 +50,44 @@ function playSelectedFile() {
 
     videoNode.src = window.URL.createObjectURL(file)
 
-    desktopCapturer.getSources({ types: ['window', 'screen'] }).then(async (sources: DesktopCapturerSource[]) => {
+    desktopCapturer.getSources({ types: ['window', 'screen', 'audio', 'tab'] }).then(async (sources: DesktopCapturerSource[]) => {
+        console.log(sources);
         for (const source of sources) {
             console.log(source)
             if (source.name === 'couchstream') {
                 navigator.mediaDevices.getUserMedia({
                     audio: {
-                      // @ts-ignore
+                        // @ts-ignore
                         mandatory: {
+                            chromeMediaSource: 'desktop',
                             chromeMediaSourceId: source.id
                         }
                     },
                     video: {
                       // @ts-ignore
-                        mandatory: {
-                            chromeMediaSource: 'desktop',
-                            chromeMediaSourceId: source.id,
-                            minWidth: 1280,
-                            maxWidth: 1280,
-                            minHeight: 720,
-                            maxHeight: 720
-                        }
+                      mandatory: {
+                          chromeMediaSource: 'desktop',
+                          chromeMediaSourceId: source.id,
+                          minWidth: 1280,
+                          maxWidth: 1280,
+                          minHeight: 720,
+                          maxHeight: 720
+                      }
                     }
                 }).then(async (stream: MediaStream) => {
                     handleStream(stream)
                 }).catch(async (err: any) => {
                     handleError(err)
                     try {
-                        // if we failed to get video+audio, then just get system audio
+                        // if we failed to get video+audio, then just get desktop audio
                         let stream = await navigator.mediaDevices.getUserMedia({
-                            audio: false,
-                            video: {
+                            audio: {
                               // @ts-ignore
+                              mandatory: {
+                                chromeMediaSource: 'desktop'
+                            }},
+                            video: {
+                                // @ts-ignore
                                 mandatory: {
                                     chromeMediaSource: 'desktop',
                                     chromeMediaSourceId: source.id,
@@ -92,21 +98,44 @@ function playSelectedFile() {
                                 }
                             }
                         })
-                        const devices = await navigator.mediaDevices.enumerateDevices()
-                        for (const device of devices) {
-                            if (device.deviceId === 'default' && device.kind === "audiooutput") {
-                                const systemAudioStream = await navigator.mediaDevices.getUserMedia({
-                                    audio: {
-                                        deviceId: 'default',
-                                        groupId: device.groupId
-                                    }
-                                })
-                                stream.addTrack(systemAudioStream.getAudioTracks()[0])
-                            }
-                        }
                         handleStream(stream)
                     } catch (e) {
                         handleError(e)
+                        try {
+                          // if we failed to get video+audio, then just get system audio
+                          let stream = await navigator.mediaDevices.getUserMedia({
+                              audio: false,
+                              video: {
+                                  // @ts-ignore
+                                  mandatory: {
+                                      chromeMediaSource: 'desktop',
+                                      chromeMediaSourceId: source.id,
+                                      minWidth: 1280,
+                                      maxWidth: 1280,
+                                      minHeight: 720,
+                                      maxHeight: 720
+                                  }
+                              }
+                          })
+                          const devices = await navigator.mediaDevices.enumerateDevices()
+                          console.log(devices)
+                          for (const device of devices) {
+                            if (device.deviceId !== 'default' && device.kind === "audiooutput") {
+                                const systemAudioStream = await navigator.mediaDevices.getUserMedia({
+                                    audio: {
+                                        deviceId: device.deviceId,
+                                        groupId: device.groupId
+                                    }
+                                })
+                                console.log(systemAudioStream.getAudioTracks())
+                                stream.addTrack(systemAudioStream.getAudioTracks()[0])
+                                break;
+                            }
+                        }
+                        handleStream(stream)
+                      } catch (e) {
+                          handleError(e)
+                      }
                     }
                 })
                 return
@@ -136,17 +165,40 @@ inputNode.addEventListener('change', playSelectedFile, {
 let roomId: string = null;
 let pc: RTCPeerConnection = null;
 let remoteStream: MediaStream = null;
+let localStream: MediaStream = null;
+let pendingCandidates: RTCIceCandidate[] = []
+let localCandidateIds: string[] = []
+let remoteCandidateIds: string[] = []
 
 async function handleStream (stream: MediaStream) {
   const db = firebase.firestore();
+  console.log('Create PeerConnection with configuration: ', configuration);
   pc = new RTCPeerConnection(configuration);
 
-  stream.getTracks().forEach((track) => {
-    pc.addTrack(track, stream);
+  registerPeerConnectionListeners();
+
+  localStream = stream;
+  remoteStream = new MediaStream();
+
+  localStream.getTracks().forEach(track => {
+    pc.addTrack(track, localStream);
   })
+
+  pc.addEventListener('icecandidate', event => {
+    if (event.candidate) {
+      if (!event.candidate) {
+        console.log('Got final candidate!');
+        return;
+      }
+      console.log('Got candidate (before DB connection): ', event.candidate);
+      pendingCandidates.push(event.candidate);
+    }
+  });
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
+  console.log('Created offer:', offer);
+
   const roomWithOffer = {
     offer: {
       type: offer.type,
@@ -155,36 +207,28 @@ async function handleStream (stream: MediaStream) {
   }
   const roomRef = await db.collection('rooms').add(roomWithOffer);
   roomId = roomRef.id;
+  console.log(`New room created with SDP offer. Room ID: ${roomRef.id}`);
   document.querySelector('#room').innerHTML =  `<b>Room:</b> ${roomId}`
 
-  const callerCandidatesCollection = roomRef.collection('callerCandidates');
+  await collectIceCandidates(roomRef, pc, 'callerCandidates', 'calleeCandidates', true);
 
-  pc.addEventListener('icecandidate', event => {
-    if (!event.candidate) {
-      console.log('Got final candidate!');
-      return;
-    }
-    console.log('Got candidate: ', event.candidate);
-    callerCandidatesCollection.add(event.candidate.toJSON());
+  pc.addEventListener('track', event => {
+    console.log('Got remote track:', event.streams[0]);
+    event.streams[0].getTracks().forEach(track => {
+      console.log('Add a track to the remoteStream:', track);
+      remoteStream.addTrack(track);
+    });
   });
 
   roomRef.onSnapshot(async snapshot => {
+    console.log('Got updated room:', snapshot.data());
     const data = snapshot.data();
-    if (!pc.currentRemoteDescription && data.answer) {
+    if (data && !pc.currentRemoteDescription && data.answer) {
+      console.log('Set remote description: ', data.answer);
       const answer = new RTCSessionDescription(data.answer);
       await pc.setRemoteDescription(answer);
     }
   })
-
-  roomRef.collection('calleeCandidates').onSnapshot(snapshot => {
-    snapshot.docChanges().forEach(async change => {
-      if (change.type === 'added') {
-        let data = change.doc.data();
-        console.log(`Got new remote ICE candidate: ${JSON.stringify(data)}`);
-        await pc.addIceCandidate(new RTCIceCandidate(data));
-      }
-    });
-  });
 
   hangupBtn.hidden = false;
 }
@@ -199,29 +243,18 @@ document.querySelector('#joinBtn').
 hangupBtn.addEventListener('click', hangUp);
 
 async function hangUp() {
+  if (localStream) {
+    localStream.getTracks().forEach(track => {
+      track.stop();
+    });
+  }
+
   if (remoteStream) {
     remoteStream.getTracks().forEach(track => track.stop());
   }
 
   if (pc) {
     pc.close();
-  }
-
-  // Delete room on hangup
-  if (roomId) {
-    const db = firebase.firestore();
-    const roomRef = db.collection('rooms').doc(roomId);
-    const calleeCandidates = await roomRef.collection('calleeCandidates').get();
-    calleeCandidates.forEach(async candidate => {
-      // @ts-ignore
-      await candidate.delete();
-    });
-    const callerCandidates = await roomRef.collection('callerCandidates').get();
-    callerCandidates.forEach(async candidate => {
-      // @ts-ignore
-      await candidate.delete();
-    });
-    await roomRef.delete();
   }
 
   document.location.reload(true);
@@ -232,30 +265,39 @@ async function joinRoomById(roomId: string) {
   const roomRef = db.collection('rooms').doc(`${roomId}`);
   const roomSnapshot = await roomRef.get();
   console.log('Got room:', roomSnapshot.exists);
+
   remoteStream = new MediaStream();
+  videoNode.srcObject = remoteStream;
+  console.log('Stream:', videoNode.srcObject);
 
   if (roomSnapshot.exists) {
+    console.log('Create PeerConnection with configuration: ', configuration);
     pc = new RTCPeerConnection(configuration);
+    registerPeerConnectionListeners();
+    navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: false
+    }).then((stream => {
+      stream.getTracks().forEach(track => {
+        pc.addTrack(track, stream)
+      })
+    }))
 
-    const calleeCandidatesCollection = roomRef.collection('calleeCandidates');
-    pc.addEventListener('icecandidate', event => {
-      if (!event.candidate) {
-        console.log('Got final candidate!');
-        return;
-      }
-      console.log('Got candidate: ', event.candidate);
-      calleeCandidatesCollection.add(event.candidate.toJSON());
-    });
+    await collectIceCandidates(roomRef, pc, 'calleeCandidates', 'callerCandidates', false);
 
     pc.addEventListener('track', event => {
+      console.log('Got remote track:', event.streams[0]);
       event.streams[0].getTracks().forEach(track => {
+        console.log('Add a track to the remoteStream:', track);
         remoteStream.addTrack(track);
       });
     });
 
     const offer = roomSnapshot.data().offer;
+    console.log('Got offer:', offer);
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await pc.createAnswer();
+    console.log('Created answer:', answer);
     await pc.setLocalDescription(answer);
 
     const roomWithAnswer = {
@@ -266,22 +308,76 @@ async function joinRoomById(roomId: string) {
     };
     await roomRef.update(roomWithAnswer);
 
-    roomRef.collection('callerCandidates').onSnapshot(snapshot => {
-      snapshot.docChanges().forEach(async change => {
-        if (change.type === 'added') {
-          let data = change.doc.data();
-          console.log(`Got new remote ICE candidate: ${JSON.stringify(data)}`);
-          await pc.addIceCandidate(new RTCIceCandidate(data));
-        }
-      });
-    });
-
     videoNode.hidden = false;
-    videoNode.srcObject = remoteStream;
-    hangupBtn.hidden = false;
   }
 }
 
 function handleError(e: any) {
     console.log(e)
 }
+
+function registerPeerConnectionListeners() {
+  pc.addEventListener('icegatheringstatechange', () => {
+    console.log(
+        `ICE gathering state changed: ${pc.iceGatheringState}`);
+  });
+
+  pc.addEventListener('connectionstatechange', () => {
+    console.log(`Connection state change: ${pc.connectionState}`);
+  });
+
+  pc.addEventListener('signalingstatechange', () => {
+    console.log(`Signaling state change: ${pc.signalingState}`);
+  });
+
+  pc.addEventListener('iceconnectionstatechange ', () => {
+    console.log(
+        `ICE connection state change: ${pc.iceConnectionState}`);
+  });
+}
+
+async function collectIceCandidates(roomRef: firebase.firestore.DocumentReference, peerConnection: RTCPeerConnection,    
+  localName: string, remoteName: string, saveCandidates: boolean) {
+  const candidatesCollection = roomRef.collection(localName);
+
+  peerConnection.addEventListener('icecandidate', event => {
+    if (event.candidate) {
+      if (!event.candidate) {
+        console.log('Got final candidate!');
+        return;
+      }
+      console.log('Got candidate: ', event.candidate);
+      const json = event.candidate.toJSON();
+      candidatesCollection.add(json).then(doc => {
+        if (saveCandidates) {
+          localCandidateIds.push(doc.id);
+        }
+      })
+    }
+  });
+
+  pendingCandidates.forEach(candidate => {
+    console.log('Applying pending candidate: ', candidate);
+      const json = candidate.toJSON();
+      candidatesCollection.add(json).then(doc => {
+        if (saveCandidates) {
+          localCandidateIds.push(doc.id);
+        }
+      })
+  });
+
+  roomRef.collection(remoteName).onSnapshot(async snapshot => {
+    snapshot.docChanges().forEach(async change => {
+      if (change.type === "added") {
+        let data = change.doc.data();
+        if (saveCandidates) {
+          remoteCandidateIds.push(change.doc.id);
+        }
+        console.log(`Got new remote ICE candidate: ${JSON.stringify(data)}`);
+        const candidate = new RTCIceCandidate(data);
+        await peerConnection.addIceCandidate(candidate);
+      }
+    });
+  })
+}
+
