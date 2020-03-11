@@ -12,10 +12,10 @@
             <hr>
             <h3>Host</h3>
             <div id="message"></div>
-            <input type="file" accept="video/*" id="fileSelector">
+            <input type="file" accept="video/*,text/vtt" id="fileSelector">
         </div>
-        <button id="hangupBtn" hidden>End Stream</button>
+        <button id="leaveStreamBtn" hidden>Leave stream</button>
         <hr>
-        <video controls autoplay hidden></video>
+        <video controls hidden controlslist="nodownload"></video>
     </body>
 </html>

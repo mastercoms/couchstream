@@ -1,12 +1,11 @@
-import './index.css';
-import { DesktopCapturerSource } from 'electron';
-import * as firebase from 'firebase/app';
-import 'firebase/firestore';
-import 'firebase/functions';
+import './index.css'
+import * as firebase from 'firebase/app'
+import 'firebase/firestore'
 
-console.log('👋 This message is being logged by "renderer.js", included via webpack');
+// Test initial logging
+console.log('👋 couchstream says hi!')
 
-// Your web app's Firebase configuration
+// Firebase configuration
 var firebaseConfig = {
   apiKey: "AIzaSyCYXdvB_dMR47pJ7738M7zzN2Eg7ovLw_E",
   authDomain: "couchstream-44159.firebaseapp.com",
@@ -15,135 +14,32 @@ var firebaseConfig = {
   storageBucket: "couchstream-44159.appspot.com",
   messagingSenderId: "85553429708",
   appId: "1:85553429708:web:6eead7d8ec5da0c36b5669"
-};
-// Initialize Firebase
-firebase.initializeApp(firebaseConfig);
-
-// In the renderer process.
-const { desktopCapturer } = require('electron')
-
-function displayMessage(message: string) {
-    let element = document.querySelector('#message')
-    element.innerHTML = message
 }
 
+// Get video player
 let videoNode = document.querySelector('video')
-let hangupBtn: HTMLElement = document.querySelector('#hangupBtn')
 
-function playSelectedFile() {
-    let file = this.files[0]
-    let type = file.type
-    videoNode.hidden = false;
-    let canPlay: CanPlayTypeResult = videoNode.canPlayType(type)
-    let canPlayString = canPlay.toString()
-    let isError = false
-    if (!canPlayString) {
-        canPlayString = 'no'
-        isError = true
-    }
-    let message = 'Can play type "' + type + '": ' + canPlayString
-    displayMessage(message)
+// Button to leave the stream
+let leaveStreamBtn: HTMLElement = document.querySelector('#leaveStreamBtn')
+leaveStreamBtn.addEventListener('click', hangUp);
 
-    if (isError) {
-        return
-    }
+// File selector for video and subtitles
+let inputNode: HTMLInputElement = document.querySelector('#fileSelector')
+inputNode.addEventListener('change', playSelectedFile, {
+    passive: true,
+    capture: false
+})
 
-    videoNode.src = window.URL.createObjectURL(file)
+// WebRTC p2p variables
+let roomId: string = null;
+let pc: RTCPeerConnection = null;
+let remoteStream: MediaStream = null;
+let localStream: MediaStream = null;
+let pendingCandidates: RTCIceCandidate[] = []
+let localCandidateIds: string[] = []
+let remoteCandidateIds: string[] = []
 
-    desktopCapturer.getSources({ types: ['window', 'screen', 'audio', 'tab'] }).then(async (sources: DesktopCapturerSource[]) => {
-        console.log(sources);
-        for (const source of sources) {
-            console.log(source)
-            if (source.name === 'couchstream') {
-                navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        // @ts-ignore
-                        mandatory: {
-                            chromeMediaSource: 'desktop',
-                            chromeMediaSourceId: source.id
-                        }
-                    },
-                    video: {
-                      // @ts-ignore
-                      mandatory: {
-                          chromeMediaSource: 'desktop',
-                          chromeMediaSourceId: source.id,
-                          minWidth: 1280,
-                          maxWidth: 1280,
-                          minHeight: 720,
-                          maxHeight: 720
-                      }
-                    }
-                }).then(async (stream: MediaStream) => {
-                    handleStream(stream)
-                }).catch(async (err: any) => {
-                    handleError(err)
-                    try {
-                        // if we failed to get video+audio, then just get desktop audio
-                        let stream = await navigator.mediaDevices.getUserMedia({
-                            audio: {
-                              // @ts-ignore
-                              mandatory: {
-                                chromeMediaSource: 'desktop'
-                            }},
-                            video: {
-                                // @ts-ignore
-                                mandatory: {
-                                    chromeMediaSource: 'desktop',
-                                    chromeMediaSourceId: source.id,
-                                    minWidth: 1280,
-                                    maxWidth: 1280,
-                                    minHeight: 720,
-                                    maxHeight: 720
-                                }
-                            }
-                        })
-                        handleStream(stream)
-                    } catch (e) {
-                        handleError(e)
-                        try {
-                          // if we failed to get video+audio, then just get system audio
-                          let stream = await navigator.mediaDevices.getUserMedia({
-                              audio: false,
-                              video: {
-                                  // @ts-ignore
-                                  mandatory: {
-                                      chromeMediaSource: 'desktop',
-                                      chromeMediaSourceId: source.id,
-                                      minWidth: 1280,
-                                      maxWidth: 1280,
-                                      minHeight: 720,
-                                      maxHeight: 720
-                                  }
-                              }
-                          })
-                          const devices = await navigator.mediaDevices.enumerateDevices()
-                          console.log(devices)
-                          for (const device of devices) {
-                            if (device.deviceId !== 'default' && device.kind === "audiooutput") {
-                                const systemAudioStream = await navigator.mediaDevices.getUserMedia({
-                                    audio: {
-                                        deviceId: device.deviceId,
-                                        groupId: device.groupId
-                                    }
-                                })
-                                console.log(systemAudioStream.getAudioTracks())
-                                stream.addTrack(systemAudioStream.getAudioTracks()[0])
-                                break;
-                            }
-                        }
-                        handleStream(stream)
-                      } catch (e) {
-                          handleError(e)
-                      }
-                    }
-                })
-                return
-            }
-        }
-    })
-}
-
+// WebRTC stun server config
 const configuration = {
   iceServers: [
     {
@@ -156,35 +52,99 @@ const configuration = {
   iceCandidatePoolSize: 10,
 };
 
-let inputNode = document.querySelector('#fileSelector')
-inputNode.addEventListener('change', playSelectedFile, {
-    passive: true,
-    capture: false
-})
+// Join the input room, only attempt once
+document.querySelector('#joinBtn').
+      addEventListener('click', async () => {
+        roomId = document.querySelector<HTMLInputElement>('#roomId').value;
+        document.querySelector('#room').innerHTML =  `<b>Room:</b> ${roomId}`
+        await joinRoomById(roomId);
+      }, {once: true});
 
-let roomId: string = null;
-let pc: RTCPeerConnection = null;
-let remoteStream: MediaStream = null;
-let localStream: MediaStream = null;
-let pendingCandidates: RTCIceCandidate[] = []
-let localCandidateIds: string[] = []
-let remoteCandidateIds: string[] = []
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
 
-async function handleStream (stream: MediaStream) {
-  const db = firebase.firestore();
+function displayMessage(message: string) {
+  // Display video play error message
+  let element = document.querySelector('#message')
+  element.innerHTML = message
+}
+
+function playSelectedFile() {
+  // Get first file
+  let files = inputNode.files
+  let file = files[0]
+  let vttFile: File = null;
+  if (files.length > 1) {
+    vttFile = files[1];
+  }
+
+  // Check the file type
+  let type = file.type
+  let canPlay: CanPlayTypeResult = videoNode.canPlayType(type)
+  let canPlayString = canPlay.toString()
+  let isError = false
+  // If we can't play it (empty canPlay), error
+  if (!canPlayString) {
+      canPlayString = 'no'
+      isError = true
+  }
+
+  // Show if we can play it or not
+  let message = 'Can play type "' + type + '": ' + canPlayString
+  displayMessage(message)
+
+  // Don't do anything else if we errored
+  if (isError) {
+      return
+  }
+
+  // Start streaming locally from file to video
+  videoNode.src = window.URL.createObjectURL(file)
+  videoNode.hidden = false
+
+  // Start the WebRTC stream once we're ready on the local.
+  videoNode.oncanplay = () => {
+    // Handle captions
+    let track = document.createElement("track");
+    track.kind = "captions"
+    track.label = "Captions"
+    track.src = window.URL.createObjectURL(vttFile)
+    track.addEventListener("load", () => {
+      // @ts-ignore
+      track.mode = "showing"
+    })
+    videoNode.appendChild(track)
+    // Handle streaming from the video node
+    // @ts-ignore
+    handleStream(videoNode.captureStream())
+  }
+}
+
+function createPeerConnection() {
+  // Create peer connection
   console.log('Create PeerConnection with configuration: ', configuration);
   pc = new RTCPeerConnection(configuration);
 
+  // Add peer connection debug logging
   registerPeerConnectionListeners();
 
+  return pc;
+}
+
+async function handleStream (stream: MediaStream) {
+  // Init DB
+  const db = firebase.firestore();
+  
+  // Create peer connection
+  createPeerConnection();
+
+  // Assign to globally accessible stream
   localStream = stream;
+  // Init remote stream
   remoteStream = new MediaStream();
 
-  localStream.getTracks().forEach(track => {
-    pc.addTrack(track, localStream);
-  })
-
-  pc.addEventListener('icecandidate', event => {
+  // If we find a candidate before we create a DB entry, queue it up
+  pc.onicecandidate = (event) => {
     if (event.candidate) {
       if (!event.candidate) {
         console.log('Got final candidate!');
@@ -193,12 +153,19 @@ async function handleStream (stream: MediaStream) {
       console.log('Got candidate (before DB connection): ', event.candidate);
       pendingCandidates.push(event.candidate);
     }
-  });
+  };
 
+  // Add local stream tracks to peer connection
+  localStream.getTracks().forEach(track => {
+    pc.addTrack(track, localStream);
+  })
+
+  // Create an offer
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   console.log('Created offer:', offer);
 
+  // Create DB document with offer
   const roomWithOffer = {
     offer: {
       type: offer.type,
@@ -206,12 +173,16 @@ async function handleStream (stream: MediaStream) {
     }
   }
   const roomRef = await db.collection('rooms').add(roomWithOffer);
+  // Document ID is the room ID
   roomId = roomRef.id;
   console.log(`New room created with SDP offer. Room ID: ${roomRef.id}`);
   document.querySelector('#room').innerHTML =  `<b>Room:</b> ${roomId}`
 
+  // Listen for candidates on the DB
   await collectIceCandidates(roomRef, pc, 'callerCandidates', 'calleeCandidates', true);
 
+  // If we get tracks from remote, add them to our dummy stream
+  // We could use this later for voice chat
   pc.addEventListener('track', event => {
     console.log('Got remote track:', event.streams[0]);
     event.streams[0].getTracks().forEach(track => {
@@ -220,6 +191,7 @@ async function handleStream (stream: MediaStream) {
     });
   });
 
+  // Room was updated, check if our peer updated the remote description
   roomRef.onSnapshot(async snapshot => {
     console.log('Got updated room:', snapshot.data());
     const data = snapshot.data();
@@ -230,33 +202,29 @@ async function handleStream (stream: MediaStream) {
     }
   })
 
-  hangupBtn.hidden = false;
+  // Leave the call
+  leaveStreamBtn.hidden = false;
 }
 
-document.querySelector('#joinBtn').
-      addEventListener('click', async () => {
-        roomId = document.querySelector<HTMLInputElement>('#roomId').value;
-        document.querySelector('#room').innerHTML =  `<b>Room:</b> ${roomId}`
-        await joinRoomById(roomId);
-      }, {once: true});
-
-hangupBtn.addEventListener('click', hangUp);
-
 async function hangUp() {
+  // End local stream
   if (localStream) {
     localStream.getTracks().forEach(track => {
       track.stop();
     });
   }
 
+  // End stream coming in
   if (remoteStream) {
     remoteStream.getTracks().forEach(track => track.stop());
   }
 
+  // Close peer connection
   if (pc) {
     pc.close();
   }
 
+  // Reload 
   document.location.reload(true);
 }
 
@@ -266,14 +234,16 @@ async function joinRoomById(roomId: string) {
   const roomSnapshot = await roomRef.get();
   console.log('Got room:', roomSnapshot.exists);
 
-  remoteStream = new MediaStream();
-  videoNode.srcObject = remoteStream;
-  console.log('Stream:', videoNode.srcObject);
-
+  // Check if room ID was correct
   if (roomSnapshot.exists) {
-    console.log('Create PeerConnection with configuration: ', configuration);
-    pc = new RTCPeerConnection(configuration);
-    registerPeerConnectionListeners();
+    // Create remote stream
+    remoteStream = new MediaStream();
+    // Video play remote stream
+    videoNode.srcObject = remoteStream;
+    console.log('Stream:', videoNode.srcObject);
+    // Create peer connection
+    createPeerConnection();
+    // Add dummy stream to peer connection so other side gets something
     navigator.mediaDevices.getUserMedia({
       audio: false,
       video: false
@@ -283,8 +253,10 @@ async function joinRoomById(roomId: string) {
       })
     }))
 
+    // Listen for candidates on the DB
     await collectIceCandidates(roomRef, pc, 'calleeCandidates', 'callerCandidates', false);
 
+    // Add new tracks to our video element
     pc.addEventListener('track', event => {
       console.log('Got remote track:', event.streams[0]);
       event.streams[0].getTracks().forEach(track => {
@@ -293,13 +265,16 @@ async function joinRoomById(roomId: string) {
       });
     });
 
+    // Get offer
     const offer = roomSnapshot.data().offer;
     console.log('Got offer:', offer);
+    // Create answer
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await pc.createAnswer();
     console.log('Created answer:', answer);
     await pc.setLocalDescription(answer);
 
+    // Send answer through DB
     const roomWithAnswer = {
       answer: {
         type: answer.type,
@@ -308,18 +283,19 @@ async function joinRoomById(roomId: string) {
     };
     await roomRef.update(roomWithAnswer);
 
+    // Show video and leave call button
     videoNode.hidden = false;
+    leaveStreamBtn.hidden = false;
+  } else {
+    // Bad room, start from beginning
+    document.location.reload(true);
   }
 }
 
-function handleError(e: any) {
-    console.log(e)
-}
-
+// Debug logging for peer connection status
 function registerPeerConnectionListeners() {
   pc.addEventListener('icegatheringstatechange', () => {
-    console.log(
-        `ICE gathering state changed: ${pc.iceGatheringState}`);
+    console.log(`ICE gathering state changed: ${pc.iceGatheringState}`);
   });
 
   pc.addEventListener('connectionstatechange', () => {
@@ -331,8 +307,7 @@ function registerPeerConnectionListeners() {
   });
 
   pc.addEventListener('iceconnectionstatechange ', () => {
-    console.log(
-        `ICE connection state change: ${pc.iceConnectionState}`);
+    console.log(`ICE connection state change: ${pc.iceConnectionState}`);
   });
 }
 
@@ -340,7 +315,8 @@ async function collectIceCandidates(roomRef: firebase.firestore.DocumentReferenc
   localName: string, remoteName: string, saveCandidates: boolean) {
   const candidatesCollection = roomRef.collection(localName);
 
-  peerConnection.addEventListener('icecandidate', event => {
+  // Replace event listener for ICE candidates
+  peerConnection.onicecandidate = (event) => {
     if (event.candidate) {
       if (!event.candidate) {
         console.log('Got final candidate!');
@@ -348,18 +324,23 @@ async function collectIceCandidates(roomRef: firebase.firestore.DocumentReferenc
       }
       console.log('Got candidate: ', event.candidate);
       const json = event.candidate.toJSON();
+      // Add our ICE candidate to the database
       candidatesCollection.add(json).then(doc => {
+        // Save candidates, so that the host can clear them all
         if (saveCandidates) {
           localCandidateIds.push(doc.id);
         }
       })
     }
-  });
+  };
 
+  // Push pending candidates
   pendingCandidates.forEach(candidate => {
     console.log('Applying pending candidate: ', candidate);
       const json = candidate.toJSON();
+      // Add our ICE candidate to the database
       candidatesCollection.add(json).then(doc => {
+        // Save candidates, so that the host can clear them all
         if (saveCandidates) {
           localCandidateIds.push(doc.id);
         }
@@ -368,16 +349,18 @@ async function collectIceCandidates(roomRef: firebase.firestore.DocumentReferenc
 
   roomRef.collection(remoteName).onSnapshot(async snapshot => {
     snapshot.docChanges().forEach(async change => {
+      // If remote added candidates, get them
       if (change.type === "added") {
         let data = change.doc.data();
+        // Save candidates, so that the host can clear them all
         if (saveCandidates) {
           remoteCandidateIds.push(change.doc.id);
         }
         console.log(`Got new remote ICE candidate: ${JSON.stringify(data)}`);
+        // Add remote ICE candidate
         const candidate = new RTCIceCandidate(data);
         await peerConnection.addIceCandidate(candidate);
       }
     });
   })
 }
-
